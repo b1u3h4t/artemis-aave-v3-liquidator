@@ -37,12 +37,14 @@ struct DeploymentConfig {
     oracle_address: Address,
     l2_encoder: Address,
     creation_block: u64,
+    weth_address: Address,
 }
 
 #[derive(Debug, Clone, Parser, ValueEnum)]
 pub enum Deployment {
     AAVE,
     SEASHELL,
+    AaveV3Celo,
 }
 
 pub const WETH_ADDRESS: &str = "0x4200000000000000000000000000000000000006";
@@ -67,6 +69,7 @@ fn get_deployment_config(deployment: Deployment) -> DeploymentConfig {
                 .unwrap(),
             l2_encoder: Address::from_str("0x39e97c588B2907Fb67F44fea256Ae3BA064207C5").unwrap(),
             creation_block: 2963358,
+            weth_address: Address::from_str(WETH_ADDRESS).unwrap(),
         },
         Deployment::SEASHELL => DeploymentConfig {
             pool_address: Address::from_str("0x8F44Fd754285aa6A2b8B9B97739B79746e0475a7").unwrap(),
@@ -76,6 +79,17 @@ fn get_deployment_config(deployment: Deployment) -> DeploymentConfig {
                 .unwrap(),
             l2_encoder: Address::from_str("0xceceF475167f7BFD8995c0cbB577644b623cD7Cf").unwrap(),
             creation_block: 3318602,
+            weth_address: Address::from_str(WETH_ADDRESS).unwrap(),
+        },
+        Deployment::AaveV3Celo => DeploymentConfig {
+            pool_address: Address::from_str("0x3E59A31363E2ad014dcbc521c4a0d5757d9f3402").unwrap(),
+            pool_data_provider: Address::from_str("0x33b7d355613110b4E842f5f7057Ccd36fb4cee28")
+                .unwrap(),
+            oracle_address: Address::from_str("0x1e693D088ceFD1E95ba4c4a5F7EeA41a1Ec37e8b")
+                .unwrap(),
+            l2_encoder: Address::zero(),
+            creation_block: 30390066,
+            weth_address: Address::from_str("0x471EcE3750Da237f93B8E339c536989b8978a438").unwrap(),
         },
     }
 }
@@ -465,7 +479,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
     // 8 decimals of precision
     async fn get_asset_price_eth(&self, asset: &Address, pool_state: &PoolState) -> Result<U256> {
         // 1:1 for weth
-        let weth_address = WETH_ADDRESS.parse::<Address>().unwrap();
+        let weth_address = self.config.weth_address;
         if asset.eq(&weth_address) {
             return Ok(U256::from(PRICE_ONE));
         }
@@ -636,6 +650,11 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
         &self,
         op: &LiquidationOpportunity,
     ) -> Result<ContractCall<M, I256>> {
+        if self.config.l2_encoder == Address::zero() {
+            return Err(anyhow!(
+                "L2 Encoder address is not deployed on this network"
+            ));
+        }
         let liquidator = Liquidator::new(self.liquidator, self.client.clone());
         let encoder = L2Encoder::new(self.config.l2_encoder, self.client.clone());
         let (data0, data1) = encoder
