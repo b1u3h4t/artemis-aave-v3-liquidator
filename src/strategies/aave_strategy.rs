@@ -1,6 +1,6 @@
 use super::types::Config;
 use crate::collectors::time_collector::NewTick;
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Error, Result};
 use artemis_core::executors::mempool_executor::{GasBidInfo, SubmitTxToMempool};
 use artemis_core::types::Strategy;
 use async_trait::async_trait;
@@ -136,6 +136,7 @@ pub struct AaveStrategy<M> {
     chain_id: u64,
     config: DeploymentConfig,
     liquidator: Address,
+    use_aave_liquidator: bool,
 }
 
 impl<M: Middleware + 'static> AaveStrategy<M> {
@@ -144,6 +145,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
         config: Config,
         deployment: Deployment,
         liquidator_address: String,
+        use_aave_liquidator: bool,
     ) -> Self {
         Self {
             client,
@@ -154,6 +156,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
             chain_id: config.chain_id,
             config: get_deployment_config(deployment),
             liquidator: Address::from_str(&liquidator_address).expect("invalid liquidator address"),
+            use_aave_liquidator,
         }
     }
 }
@@ -412,33 +415,48 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
     async fn approve_tokens(&mut self) -> Result<()> {
         let liquidator = Liquidator::new(self.liquidator, self.client.clone());
 
-        let mut nonce = self
+        let sender = self
             .client
-            .get_transaction_count(
-                self.client
-                    .default_sender()
-                    .ok_or(anyhow!("No connected sender"))?,
-                None,
-            )
-            .await?;
+            .default_sender()
+            .ok_or(anyhow!("No connected sender"))?;
+        let mut nonce = self.client.get_transaction_count(sender, None).await?;
         for token_address in self.tokens.keys() {
             let token = IERC20::new(token_address.clone(), self.client.clone());
-            let allowance = token
-                .allowance(self.liquidator, self.config.pool_address)
-                .call()
-                .await?;
-            if allowance == U256::zero() {
-                // TODO remove unwrap once we figure out whats broken
-                liquidator
-                    .approve_pool(*token_address)
-                    .nonce(nonce)
-                    .send()
-                    .await
-                    .map_err(|e| {
-                        error!("approve failed: {:?}", e);
-                        e
-                    })?;
-                nonce = nonce + 1;
+            if self.use_aave_liquidator {
+                let allowance = token
+                    .allowance(sender, self.config.pool_address)
+                    .call()
+                    .await?;
+                if allowance == U256::zero() {
+                    token
+                        .approve(self.config.pool_address, U256::MAX)
+                        .nonce(nonce)
+                        .send()
+                        .await
+                        .map_err(|e| {
+                            error!("approve failed: {:?}", e);
+                            e
+                        })?;
+                    nonce = nonce + 1;
+                }
+            } else {
+                let allowance = token
+                    .allowance(self.liquidator, self.config.pool_address)
+                    .call()
+                    .await?;
+                if allowance == U256::zero() {
+                    // TODO remove unwrap once we figure out whats broken
+                    liquidator
+                        .approve_pool(*token_address)
+                        .nonce(nonce)
+                        .send()
+                        .await
+                        .map_err(|e| {
+                            error!("approve failed: {:?}", e);
+                            e
+                        })?;
+                    nonce = nonce + 1;
+                }
             }
         }
 
@@ -666,9 +684,19 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
         Ok(liquidator.liquidate(op.collateral, op.debt, 500, op.debt_to_cover, data0, data1))
     }
 
-    async fn build_liquidation(&self, op: &LiquidationOpportunity) -> Result<TypedTransaction> {
-        let mut call = self.build_liquidation_call(op).await?;
-        Ok(call.tx.set_chain_id(self.chain_id).clone())
+    async fn build_liquidation(
+        &self,
+        op: &LiquidationOpportunity,
+    ) -> Result<TypedTransaction, anyhow::Error> {
+        if self.use_aave_liquidator {
+            let pool = Pool::new(self.config.pool_address, self.client.clone());
+            let mut call =
+                pool.liquidation_call(op.collateral, op.debt, op.borrower, op.debt_to_cover, false);
+            Ok(call.tx.set_chain_id(self.chain_id).clone())
+        } else {
+            let mut call = self.build_liquidation_call(op).await?;
+            Ok(call.tx.set_chain_id(self.chain_id).clone())
+        }
     }
 }
 

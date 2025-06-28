@@ -1,5 +1,6 @@
 use anyhow::Result;
 use clap::Parser;
+use ethers::providers::Middleware;
 use std::str::FromStr;
 
 use artemis_core::engine::Engine;
@@ -24,7 +25,6 @@ pub mod executors;
 pub mod strategies;
 
 static POLL_INTERVAL_SECS: u64 = 60 * 5;
-pub const CHAIN_ID: u64 = 8453;
 
 /// CLI Options.
 #[derive(Parser, Debug)]
@@ -46,6 +46,10 @@ pub struct Args {
 
     #[arg(long)]
     pub liquidator_address: String,
+
+    /// Whether to use the Aave offical liquidator interface.
+    #[arg(long, default_value_t = false)]
+    pub use_aave_liquidator: bool,
 }
 
 #[tokio::main]
@@ -67,11 +71,14 @@ async fn main() -> Result<()> {
     let rpc = Http::from_str(&args.rpc)?;
     let provider = Provider::new(rpc);
 
+    let chain_id = provider.get_chainid().await?.as_u64();
+    println!("Using chain ID: {}", chain_id);
+
     let wallet: LocalWallet = args
         .private_key
         .parse::<LocalWallet>()
         .unwrap()
-        .with_chain_id(CHAIN_ID);
+        .with_chain_id(chain_id);
     let address = wallet.address();
 
     let provider = Arc::new(provider.nonce_manager(address).with_signer(wallet.clone()));
@@ -86,7 +93,7 @@ async fn main() -> Result<()> {
 
     let config = Config {
         bid_percentage: args.bid_percentage,
-        chain_id: CHAIN_ID,
+        chain_id,
     };
 
     let strategy = AaveStrategy::new(
@@ -94,6 +101,7 @@ async fn main() -> Result<()> {
         config,
         args.deployment,
         args.liquidator_address,
+        args.use_aave_liquidator,
     );
     engine.add_strategy(Box::new(strategy));
 
