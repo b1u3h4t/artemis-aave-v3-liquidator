@@ -1,6 +1,6 @@
 use super::types::Config;
 use crate::collectors::time_collector::NewTick;
-use anyhow::{anyhow, Error, Result};
+use anyhow::{anyhow, Result};
 use artemis_core::executors::mempool_executor::{GasBidInfo, SubmitTxToMempool};
 use artemis_core::types::Strategy;
 use async_trait::async_trait;
@@ -45,6 +45,7 @@ pub enum Deployment {
     AAVE,
     SEASHELL,
     AaveV3Celo,
+    AaveV3Ethereum,
 }
 
 pub const WETH_ADDRESS: &str = "0x4200000000000000000000000000000000000006";
@@ -90,6 +91,16 @@ fn get_deployment_config(deployment: Deployment) -> DeploymentConfig {
             l2_encoder: Address::zero(),
             creation_block: 30390066,
             weth_address: Address::from_str("0x471EcE3750Da237f93B8E339c536989b8978a438").unwrap(),
+        },
+        Deployment::AaveV3Ethereum => DeploymentConfig {
+            pool_address: Address::from_str("0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2").unwrap(),
+            pool_data_provider: Address::from_str("0x497a1994c46d4f6C864904A9f1fac6328Cb7C8a6")
+                .unwrap(),
+            oracle_address: Address::from_str("0x54586bE62E3c3580375aE3723C145253060Ca0C2")
+                .unwrap(),
+            l2_encoder: Address::zero(),
+            creation_block: 16291126,
+            weth_address: Address::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
         },
     }
 }
