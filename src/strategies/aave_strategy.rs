@@ -44,6 +44,7 @@ struct DeploymentConfig {
 pub enum Deployment {
     AAVE,
     SEASHELL,
+    AaveV3Sonic,
     AaveV3Celo,
     AaveV3Ethereum,
 }
@@ -81,6 +82,16 @@ fn get_deployment_config(deployment: Deployment) -> DeploymentConfig {
             l2_encoder: Address::from_str("0xceceF475167f7BFD8995c0cbB577644b623cD7Cf").unwrap(),
             creation_block: 3318602,
             weth_address: Address::from_str(WETH_ADDRESS).unwrap(),
+        },
+        Deployment::AaveV3Sonic => DeploymentConfig {
+            pool_address: Address::from_str("0x5362dBb1e601abF3a4c14c22ffEdA64042E5eAA3").unwrap(),
+            pool_data_provider: Address::from_str("0x306c124fFba5f2Bc0BcAf40D249cf19D492440b9")
+                .unwrap(),
+            oracle_address: Address::from_str("0xD63f7658C66B2934Bd234D79D06aEF5290734B30")
+                .unwrap(),
+            l2_encoder: Address::zero(),
+            creation_block: 7986580,
+            weth_address: Address::from_str("0x039e2fB66102314Ce7b64Ce5Ce3E5183bc94aD38").unwrap(),
         },
         Deployment::AaveV3Celo => DeploymentConfig {
             pool_address: Address::from_str("0x3E59A31363E2ad014dcbc521c4a0d5757d9f3402").unwrap(),
@@ -660,12 +671,31 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
             profit_eth: I256::from(0),
         };
 
-        let gain = self.build_liquidation_call(&op).await?.call().await?;
+        if self.use_aave_liquidator {
+            op.profit_eth = I256::from_dec_str(&collateral_asset_price.to_string())?
+                .checked_mul(I256::from_dec_str(&collateral_to_liquidate.to_string())?)
+                .unwrap()
+                .checked_sub(
+                    I256::from_dec_str(&debt_to_cover.to_string())?
+                        .checked_mul(I256::from_dec_str(&debt_asset_price.to_string())?)
+                        .unwrap(),
+                )
+                .unwrap()
+                / I256::from(PRICE_ONE);
+            info!("Using Aave liquidator - profit_eth: {:?}", op.profit_eth);
+            self.build_liquidation(&op)
+                .await
+                .map_err(|e| error!("Error building liquidation: {}", e))
+                .unwrap();
+        } else {
+            let gain = self.build_liquidation_call(&op).await?.call().await?;
 
-        let weth_price = self
-            .get_asset_price_eth(collateral_address, pool_state)
-            .await?;
-        op.profit_eth = gain * I256::from_dec_str(&weth_price.to_string())? / I256::from(PRICE_ONE);
+            let weth_price = self
+                .get_asset_price_eth(collateral_address, pool_state)
+                .await?;
+            op.profit_eth =
+                gain * I256::from_dec_str(&weth_price.to_string())? / I256::from(PRICE_ONE);
+        }
 
         info!(
             "Found opportunity - collateral: {:?}, debt: {:?}, collateral_to_liquidate: {:?}, debt_to_cover: {:?}, profit_eth: {:?}",
