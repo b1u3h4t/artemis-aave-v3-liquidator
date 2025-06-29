@@ -47,6 +47,7 @@ pub enum Deployment {
     AaveV3Sonic,
     AaveV3Celo,
     AaveV3Ethereum,
+    AaveV3Optimisum,
 }
 
 pub const WETH_ADDRESS: &str = "0x4200000000000000000000000000000000000006";
@@ -112,6 +113,16 @@ fn get_deployment_config(deployment: Deployment) -> DeploymentConfig {
             l2_encoder: Address::zero(),
             creation_block: 16291126,
             weth_address: Address::from_str("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2").unwrap(),
+        },
+        Deployment::AaveV3Optimisum => DeploymentConfig {
+            pool_address: Address::from_str("0x794a61358D6845594F94dc1DB02A252b5b4814aD").unwrap(),
+            pool_data_provider: Address::from_str("0x14496b405D62c24F91f04Cda1c69Dc526D56fDE5")
+                .unwrap(),
+            oracle_address: Address::from_str("0xD81eb3728a631871a7eBBaD631b5f424909f0c77")
+                .unwrap(),
+            l2_encoder: Address::from_str("0x9abADECD08572e0eA5aF4d47A9C7984a5AA503dC").unwrap(),
+            creation_block: 4365693,
+            weth_address: Address::from_str(WETH_ADDRESS).unwrap(),
         },
     }
 }
