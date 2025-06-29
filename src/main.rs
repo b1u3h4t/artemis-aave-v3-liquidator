@@ -30,25 +30,25 @@ static POLL_INTERVAL_SECS: u64 = 60 * 5;
 #[derive(Parser, Debug)]
 pub struct Args {
     /// Ethereum node WS endpoint.
-    #[arg(long)]
+    #[arg(long, env = "RPC", value_name = "URL", required = true)]
     pub rpc: String,
 
     /// Private key for sending txs.
-    #[arg(long)]
+    #[arg(long, env = "PRIVATE_KEY", value_name = "HEX", required = true)]
     pub private_key: String,
 
     /// Percentage of profit to pay in gas.
-    #[arg(long)]
+    #[arg(long, env = "BID_PERCENTAGE", value_name = "U64", default_value_t = 50)]
     pub bid_percentage: u64,
 
-    #[arg(long)]
+    #[arg(long, env = "DEPLOYMENT", required = true)]
     pub deployment: Deployment,
 
-    #[arg(long)]
+    #[arg(long, env = "LIQUIDATOR_ADDRESS", required = true)]
     pub liquidator_address: String,
 
     /// Whether to use the Aave offical liquidator interface.
-    #[arg(long, default_value_t = false)]
+    #[arg(long, env = "USE_AAVE_LIQUIDATOR", default_value_t = false)]
     pub use_aave_liquidator: bool,
 }
 
