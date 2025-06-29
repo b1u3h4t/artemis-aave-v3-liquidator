@@ -143,6 +143,7 @@ pub struct TokenConfig {
     liquidation_bonus: u64,
     reserve_factor: u64,
     protocol_fee: u64,
+    symbol: String,
 }
 
 #[derive(Debug)]
@@ -189,6 +190,8 @@ struct LiquidationOpportunity {
     debt: Address,
     debt_to_cover: U256,
     profit_eth: I256,
+    collateral_symbol: String,
+    debt_symbol: String,
 }
 
 #[async_trait]
@@ -509,6 +512,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
                     liquidation_bonus: bonus.low_u64(),
                     reserve_factor: reserve.low_u64(),
                     protocol_fee: protocol_fee.low_u64(),
+                    symbol: token.symbol,
                 },
             );
         }
@@ -663,12 +667,25 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
                 / percent_div(debt_asset_price * collateral_unit, liquidation_bonus);
         }
 
+        let collateral_symbol = self
+            .tokens
+            .get(collateral_address)
+            .map(|c| c.symbol.clone())
+            .unwrap_or_default();
+        let debt_symbol = self
+            .tokens
+            .get(&debt_address)
+            .map(|d| d.symbol.clone())
+            .unwrap_or_default();
+
         let mut op = LiquidationOpportunity {
             borrower: borrower_address.clone(),
             collateral: collateral_address.clone(),
             debt: debt_address.clone(),
             debt_to_cover,
             profit_eth: I256::from(0),
+            collateral_symbol,
+            debt_symbol,
         };
 
         if self.use_aave_liquidator {
@@ -698,8 +715,8 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
         }
 
         info!(
-            "Found opportunity - collateral: {:?}, debt: {:?}, collateral_to_liquidate: {:?}, debt_to_cover: {:?}, profit_eth: {:?}",
-            collateral_address, debt_address, collateral_to_liquidate, debt_to_cover, op.profit_eth
+            "Found opportunity - borrower: {:?}, collateral: {:?}({}), debt: {:?}({}), collateral_to_liquidate: {:?}, debt_to_cover: {:?}, profit_eth: {:?}",
+            op.borrower, collateral_address, op.collateral_symbol, debt_address, op.debt_symbol, collateral_to_liquidate, debt_to_cover, op.profit_eth
         );
 
         Ok(op)
