@@ -62,7 +62,7 @@ pub const DEFAULT_LIQUIDATION_CLOSE_FACTOR: u64 = 5000;
 
 // admin stuff
 pub const LOG_BLOCK_RANGE: u64 = 1024;
-pub const MULTICALL_CHUNK_SIZE: usize = 100;
+pub const MULTICALL_CHUNK_SIZE: usize = 500;
 pub const STATE_CACHE_FILE: &str = "borrowers.json";
 pub const PRICE_ONE: u64 = 100000000;
 
@@ -239,6 +239,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
     }
 }
 
+#[derive(Debug)]
 struct LiquidationOpportunity {
     borrower: Address,
     collateral: Address,
@@ -247,6 +248,7 @@ struct LiquidationOpportunity {
     profit_eth: I256,
     collateral_symbol: String,
     debt_symbol: String,
+    profit_factor: I256,
 }
 
 #[async_trait]
@@ -296,7 +298,7 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
             .map_err(|e| error!("Error finding liq ops: {}", e))
             .ok()??;
 
-        info!("Best op - profit: {}", op.profit_eth);
+        info!("Best op: {:?}", op);
 
         if op.profit_eth < I256::from(0) {
             info!("No profitable ops, passing");
@@ -337,6 +339,9 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
             .values()
             .filter(|b| b.debt.len() > 0)
             .collect();
+        let n = borrowers.len();
+        let mut i = 0;
+        info!("Found {} borrowers with debt", n);
 
         for chunk in borrowers.chunks(MULTICALL_CHUNK_SIZE) {
             multicall.clear_calls();
@@ -354,6 +359,21 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
                     );
                     underwater_borrowers.push((borrower.address, health_factor));
                 }
+            }
+            info!(
+                "Found {} underwater borrowers, total progress: {}%",
+                underwater_borrowers.len(),
+                100 * (MULTICALL_CHUNK_SIZE * i) / n,
+            );
+            i += 1;
+
+            // sleep to avoid hitting rate limits
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+            // FIXME:
+            if underwater_borrowers.len() >= 50 {
+                info!("Too many underwater borrowers, stopping search");
+                break;
             }
         }
 
@@ -587,14 +607,23 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
         let usd_price = pool_state
             .prices
             .get(asset)
-            .ok_or(anyhow!("No price found for asset {}", asset.to_string()))?;
+            .ok_or(anyhow!("No price found for asset {:?}", asset))?;
+        let asset_symbol = self
+            .tokens
+            .get(asset)
+            .map(|t| t.symbol.clone())
+            .unwrap_or_else(|| "Unknown".to_string());
+        info!("{}/USD: {}, asset: {:?}", asset_symbol, usd_price, asset);
         // usd / eth
-        let usd_price_eth = pool_state.prices.get(&weth_address).ok_or(anyhow!(
-            "No price found for asset {}",
-            weth_address.to_string()
-        ))?;
+        let usd_price_eth = pool_state
+            .prices
+            .get(&weth_address)
+            .ok_or(anyhow!("No price found for asset {}", weth_address))?;
+        info!("WETH/USD: {}, asset: {:?}", usd_price_eth, weth_address);
         // usd / token * eth / usd = eth / token
-        Ok(usd_price * U256::from(PRICE_ONE) / usd_price_eth)
+        let x = usd_price * U256::from(PRICE_ONE) / usd_price_eth;
+        info!("{}/ETH: {}", asset_symbol, x);
+        Ok(x)
     }
 
     async fn get_best_liquidation_op(&mut self) -> Result<Option<LiquidationOpportunity>> {
@@ -741,32 +770,53 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
             profit_eth: I256::from(0),
             collateral_symbol,
             debt_symbol,
+            profit_factor: I256::from(0),
         };
 
+        let asset_price_in_eth = self
+            .get_asset_price_eth(collateral_address, pool_state)
+            .await?;
+        let debt_price_in_eth = self.get_asset_price_eth(debt_address, pool_state).await?;
+
         if self.use_aave_liquidator {
-            op.profit_eth = I256::from_dec_str(&collateral_asset_price.to_string())?
+            let asset_value_in_eth = I256::from_dec_str(&asset_price_in_eth.to_string())?
                 .checked_mul(I256::from_dec_str(&collateral_to_liquidate.to_string())?)
                 .unwrap()
-                .checked_sub(
-                    I256::from_dec_str(&debt_to_cover.to_string())?
-                        .checked_mul(I256::from_dec_str(&debt_asset_price.to_string())?)
-                        .unwrap(),
-                )
+                .checked_div(I256::from_dec_str(&collateral_unit.to_string())?)
+                .unwrap();
+            let debt_value_in_eth = I256::from_dec_str(&debt_price_in_eth.to_string())?
+                .checked_mul(I256::from_dec_str(&debt_to_cover.to_string())?)
                 .unwrap()
-                / I256::from(PRICE_ONE);
-            info!("Using Aave liquidator - profit_eth: {:?}", op.profit_eth);
+                .checked_div(I256::from_dec_str(&debt_unit.to_string())?)
+                .unwrap();
+            op.profit_eth = asset_value_in_eth.checked_sub(debt_value_in_eth).unwrap();
+            op.profit_factor = asset_value_in_eth
+                .checked_mul(I256::from(100))
+                .unwrap()
+                .checked_div(debt_value_in_eth)
+                .unwrap_or(I256::from(0));
+            if debt_to_cover == U256::zero() {
+                op.profit_eth = I256::from(0);
+                op.profit_factor = I256::from(0);
+                return Err(anyhow!(
+                    "No debt to cover for borrower {:?}, collateral {:?}, debt {:?}",
+                    borrower_address,
+                    collateral_address,
+                    debt_address
+                ));
+            }
+            info!(
+                "Using Aave liquidator - profit in ETH: {}, asset_value_in_eth: {}, debt_value_in_eth: {}, profit factor: {}%",
+                op.profit_eth, asset_value_in_eth, debt_value_in_eth, op.profit_factor
+            );
             self.build_liquidation(&op)
                 .await
                 .map_err(|e| error!("Error building liquidation: {}", e))
                 .unwrap();
         } else {
             let gain = self.build_liquidation_call(&op).await?.call().await?;
-
-            let weth_price = self
-                .get_asset_price_eth(collateral_address, pool_state)
-                .await?;
             op.profit_eth =
-                gain * I256::from_dec_str(&weth_price.to_string())? / I256::from(PRICE_ONE);
+                gain * I256::from_dec_str(&asset_price_in_eth.to_string())? / I256::from(PRICE_ONE);
         }
 
         info!(
