@@ -267,7 +267,7 @@ impl<M: Middleware + 'static> Strategy<Event, Action> for AaveStrategy<M> {
     }
 
     // Process incoming events, seeing if we can arb new orders, and updating the internal state on new blocks.
-    async fn process_event(&mut self, event: Event) -> Option<Action> {
+    async fn process_event(&mut self, event: Event) -> Vec<Action> {
         match event {
             // Event::NewBlock(block) => self.process_new_block_event(block).await,
             Event::NewTick(block) => self.process_new_tick_event(block).await,
@@ -284,40 +284,56 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
     // }
 
     /// Process new block events, updating the internal state.
-    async fn process_new_tick_event(&mut self, event: NewTick) -> Option<Action> {
+    async fn process_new_tick_event(&mut self, event: NewTick) -> Vec<Action> {
         info!("received new tick: {:?}", event);
-        self.update_state()
-            .await
-            .map_err(|e| error!("Update State error: {}", e))
-            .ok()?;
+        if let Err(e) = self.update_state().await {
+            error!("Update State error: {}", e);
+            return vec![];
+        }
 
         info!("Total borrower count: {}", self.borrowers.len());
-        let op = self
+        let op = match self
             .get_best_liquidation_op()
             .await
             .map_err(|e| error!("Error finding liq ops: {}", e))
-            .ok()??;
+            .ok()
+            .flatten()
+        {
+            Some(op) => op,
+            None => {
+                info!("No profitable ops, passing");
+                return vec![];
+            }
+        };
 
         info!("Best op: {:?}", op);
 
         if op.profit_eth < I256::from(0) {
             info!("No profitable ops, passing");
-            return None;
+            return vec![];
         }
 
-        return Some(Action::SubmitTx(SubmitTxToMempool {
-            tx: self
+        return vec![Action::SubmitTx(SubmitTxToMempool {
+            tx: match self
                 .build_liquidation(&op)
                 .await
                 .map_err(|e| error!("Error building liquidation: {}", e))
-                .ok()?,
-            gas_bid_info: Some(GasBidInfo {
-                bid_percentage: self.bid_percentage,
-                total_profit: U256::from_dec_str(&op.profit_eth.to_string())
-                    .map_err(|e| error!("Failed to bid: {}", e))
-                    .ok()?,
-            }),
-        }));
+                .ok()
+            {
+                Some(tx) => tx,
+                None => return vec![],
+            },
+            gas_bid_info: match U256::from_dec_str(&op.profit_eth.to_string()) {
+                Ok(total_profit) => Some(GasBidInfo {
+                    bid_percentage: self.bid_percentage,
+                    total_profit,
+                }),
+                Err(e) => {
+                    error!("Failed to bid: {}", e);
+                    return vec![];
+                }
+            },
+        })];
     }
 
     // for all known borrowers, return a sorted set of those with health factor < 1
@@ -563,6 +579,27 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
         Ok(())
     }
 
+    async fn liquidation_call(&mut self, op: &LiquidationOpportunity) -> Result<()> {
+        let pool = Pool::<M>::new(self.config.pool_address, self.client.clone());
+
+        let sender = self
+            .client
+            .default_sender()
+            .ok_or(anyhow!("No connected sender"))?;
+        let nonce = self.client.get_transaction_count(sender, None).await?;
+        if self.use_aave_liquidator {
+            pool.liquidation_call(op.collateral, op.debt, op.borrower, op.debt_to_cover, false)
+                .nonce(nonce)
+                .send()
+                .await?
+                .await?;
+        } else {
+            // TODO remove unwrap once we figure out whats broken
+        }
+
+        Ok(())
+    }
+
     async fn update_token_configs(&mut self) -> Result<()> {
         let pool_data =
             IPoolDataProvider::<M>::new(self.config.pool_data_provider, self.client.clone());
@@ -800,6 +837,18 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
                 op.profit_factor = I256::from(0);
                 return Err(anyhow!(
                     "No debt to cover for borrower {:?}, collateral {:?}, debt {:?}",
+                    borrower_address,
+                    collateral_address,
+                    debt_address
+                ));
+            }
+            if collateral_address == debt_address {
+                info!(
+                    "Collateral and debt are the same for borrower {:?}, collateral {:?}, debt {:?}",
+                    borrower_address, collateral_address, debt_address
+                );
+                return Err(anyhow!(
+                    "Collateral and debt are the same for borrower {:?}, collateral {:?}, debt {:?}, not support yet",
                     borrower_address,
                     collateral_address,
                     debt_address
