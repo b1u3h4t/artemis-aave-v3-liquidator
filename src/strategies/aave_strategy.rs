@@ -402,7 +402,13 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
     fn load_cache(&mut self) -> Result<()> {
         match File::open(STATE_CACHE_FILE) {
             Ok(file) => {
-                let cache: StateCache = serde_json::from_reader(file)?;
+                let cache: StateCache = match serde_json::from_reader(file) {
+                    Ok(cache) => cache,
+                    Err(e) => {
+                        error!("Failed to parse state cache: {}", e);
+                        return Err(anyhow!("Failed to parse state cache: {}", e));
+                    }
+                };
                 info!("read state cache from file");
                 self.last_block_number = cache.last_block_number;
                 self.borrowers = cache.borrowers;
@@ -538,40 +544,62 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
         let mut nonce = self.client.get_transaction_count(sender, None).await?;
         for token_address in self.tokens.keys() {
             let token = IERC20::new(token_address.clone(), self.client.clone());
-            if self.use_aave_liquidator {
-                let allowance = token
-                    .allowance(sender, self.config.pool_address)
-                    .call()
-                    .await?;
-                if allowance == U256::zero() {
-                    token
-                        .approve(self.config.pool_address, U256::MAX)
-                        .nonce(nonce)
-                        .send()
+            match self.use_aave_liquidator {
+                true => {
+                    match token
+                        .allowance(sender, self.config.pool_address)
+                        .call()
                         .await
-                        .map_err(|e| {
-                            error!("approve failed: {:?}", e);
-                            e
-                        })?;
-                    nonce = nonce + 1;
+                    {
+                        Ok(allowance) => {
+                            if allowance == U256::zero() {
+                                match token
+                                    .approve(self.config.pool_address, U256::MAX)
+                                    .nonce(nonce)
+                                    .send()
+                                    .await
+                                {
+                                    Ok(_) => nonce = nonce + 1,
+                                    Err(e) => {
+                                        error!("approve failed: {:?}", e);
+                                        return Err(anyhow!("approve failed: {:?}", e));
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("allowance check failed: {:?}", e);
+                            return Err(anyhow!("allowance check failed: {:?}", e));
+                        }
+                    }
                 }
-            } else {
-                let allowance = token
-                    .allowance(self.liquidator, self.config.pool_address)
-                    .call()
-                    .await?;
-                if allowance == U256::zero() {
-                    // TODO remove unwrap once we figure out whats broken
-                    liquidator
-                        .approve_pool(*token_address)
-                        .nonce(nonce)
-                        .send()
+                false => {
+                    match token
+                        .allowance(self.liquidator, self.config.pool_address)
+                        .call()
                         .await
-                        .map_err(|e| {
-                            error!("approve failed: {:?}", e);
-                            e
-                        })?;
-                    nonce = nonce + 1;
+                    {
+                        Ok(allowance) => {
+                            if allowance == U256::zero() {
+                                match liquidator
+                                    .approve_pool(*token_address)
+                                    .nonce(nonce)
+                                    .send()
+                                    .await
+                                {
+                                    Ok(_) => nonce = nonce + 1,
+                                    Err(e) => {
+                                        error!("approve failed: {:?}", e);
+                                        return Err(anyhow!("approve failed: {:?}", e));
+                                    }
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("allowance check failed: {:?}", e);
+                            return Err(anyhow!("allowance check failed: {:?}", e));
+                        }
+                    }
                 }
             }
         }
@@ -607,26 +635,46 @@ impl<M: Middleware + 'static> AaveStrategy<M> {
         let all_a_tokens = pool_data.get_all_a_tokens().await?;
         info!("all_tokens: {:?}", all_tokens);
         for (token, a_token) in zip(all_tokens, all_a_tokens) {
-            let (decimals, ltv, threshold, bonus, reserve, _, _, _, _, _) = pool_data
+            match pool_data
                 .get_reserve_configuration_data(token.token_address)
-                .await?;
-            let protocol_fee = pool_data
-                .get_liquidation_protocol_fee(token.token_address)
-                .await?;
-            self.tokens.insert(
-                token.token_address,
-                TokenConfig {
-                    address: token.token_address,
-                    a_address: a_token.token_address,
-                    decimals: decimals.low_u64(),
-                    ltv: ltv.low_u64(),
-                    liquidation_threshold: threshold.low_u64(),
-                    liquidation_bonus: bonus.low_u64(),
-                    reserve_factor: reserve.low_u64(),
-                    protocol_fee: protocol_fee.low_u64(),
-                    symbol: token.symbol,
-                },
-            );
+                .await
+            {
+                Ok((decimals, ltv, threshold, bonus, reserve, _, _, _, _, _)) => {
+                    match pool_data
+                        .get_liquidation_protocol_fee(token.token_address)
+                        .await
+                    {
+                        Ok(protocol_fee) => {
+                            self.tokens.insert(
+                                token.token_address,
+                                TokenConfig {
+                                    address: token.token_address,
+                                    a_address: a_token.token_address,
+                                    decimals: decimals.low_u64(),
+                                    ltv: ltv.low_u64(),
+                                    liquidation_threshold: threshold.low_u64(),
+                                    liquidation_bonus: bonus.low_u64(),
+                                    reserve_factor: reserve.low_u64(),
+                                    protocol_fee: protocol_fee.low_u64(),
+                                    symbol: token.symbol,
+                                },
+                            );
+                        }
+                        Err(e) => {
+                            error!(
+                                "Failed to get liquidation protocol fee for token {}: {}",
+                                token.token_address, e
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    error!(
+                        "Failed to get reserve configuration data for token {}: {}",
+                        token.token_address, e
+                    );
+                }
+            }
         }
 
         Ok(())
