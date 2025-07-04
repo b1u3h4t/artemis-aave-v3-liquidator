@@ -163,6 +163,30 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn test_ray_mul_large_numbers() {
+        let a = U256::from_dec_str("36810832517731560").unwrap();
+        let b = U256::from_dec_str("1214152450200849885139456810").unwrap();
+        assert_eq!(
+            ray_mul(a, b),
+            U256::from_dec_str("44693962495336893").unwrap()
+        );
+    }
+
+    #[test]
+    fn test_ray_mul_large_numbers_2() {
+        let a = U256::from_dec_str("172061").unwrap();
+        let b = U256::from_dec_str("1211397991557841780329274772").unwrap();
+        assert_eq!(ray_mul(a, b), U256::from_dec_str("208434").unwrap());
+    }
+
+    #[test]
+    fn test_ray_div_large_numbers() {
+        let a = U256::from_dec_str("87442380293389").unwrap();
+        let b = U256::from_dec_str("1067631066145861610382516930").unwrap();
+        assert_eq!(ray_div(a, b), U256::from_dec_str("81903180851654").unwrap());
+    }
+
     // 测试 rayDiv 函数
     #[test]
     fn test_ray_div() {
